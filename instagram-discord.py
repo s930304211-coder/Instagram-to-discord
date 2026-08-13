@@ -6,6 +6,7 @@ import json
 import random
 import tempfile
 import threading
+import re
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -21,7 +22,10 @@ import instaloader
 #
 # IG_USERNAME=account1,account2,account3
 #
-RAW_USERNAMES = os.environ.get("IG_USERNAME", "")
+RAW_USERNAMES = os.environ.get(
+    "IG_USERNAME",
+    ""
+)
 
 USERNAMES = [
     username.strip()
@@ -47,12 +51,14 @@ WEBHOOK_URL = os.environ.get(
 
 # 每一輪檢查之間的時間
 #
-# 建議：
 # 3600 = 1 小時
 # 7200 = 2 小時
 #
 CHECK_INTERVAL = int(
-    os.environ.get("CHECK_INTERVAL", "7200")
+    os.environ.get(
+        "CHECK_INTERVAL",
+        "7200"
+    )
 )
 
 
@@ -61,7 +67,10 @@ CHECK_INTERVAL = int(
 # 9 個帳號建議至少 120 秒
 #
 ACCOUNT_DELAY = int(
-    os.environ.get("ACCOUNT_DELAY", "120")
+    os.environ.get(
+        "ACCOUNT_DELAY",
+        "120"
+    )
 )
 
 
@@ -73,7 +82,10 @@ ACCOUNT_DELAY = int(
 # 1200 = 20 分鐘
 #
 INITIAL_BACKOFF = int(
-    os.environ.get("INITIAL_BACKOFF", "1200")
+    os.environ.get(
+        "INITIAL_BACKOFF",
+        "1200"
+    )
 )
 
 
@@ -81,7 +93,10 @@ INITIAL_BACKOFF = int(
 # 21600 = 6 小時
 #
 MAX_BACKOFF = int(
-    os.environ.get("MAX_BACKOFF", "21600")
+    os.environ.get(
+        "MAX_BACKOFF",
+        "21600"
+    )
 )
 
 
@@ -147,7 +162,7 @@ L = instaloader.Instaloader(
 # Global Rate Limit State
 # ============================================================
 
-rate_limit_until = 0
+rate_limit_until = 0.0
 
 backoff_seconds = INITIAL_BACKOFF
 
@@ -159,11 +174,13 @@ backoff_seconds = INITIAL_BACKOFF
 def load_state():
 
     if not os.path.exists(STATE_FILE):
+
         print(
             f"[STATE] {STATE_FILE} 不存在，建立新的 State。"
         )
 
         return {}
+
 
     try:
 
@@ -175,14 +192,18 @@ def load_state():
 
             state = json.load(f)
 
+
             if isinstance(state, dict):
+
                 return state
+
 
             print(
                 "[STATE] State 格式不是 JSON object，重設。"
             )
 
             return {}
+
 
     except Exception as e:
 
@@ -197,17 +218,22 @@ def save_state(state):
 
     try:
 
-        state_path = Path(STATE_FILE)
+        state_path = Path(
+            STATE_FILE
+        )
+
 
         state_path.parent.mkdir(
             parents=True,
             exist_ok=True
         )
 
+
         # 先寫入暫存檔
         temp_path = state_path.with_suffix(
             ".tmp"
         )
+
 
         with open(
             temp_path,
@@ -223,7 +249,11 @@ def save_state(state):
             )
 
             f.flush()
-            os.fsync(f.fileno())
+
+            os.fsync(
+                f.fileno()
+            )
+
 
         # 完成後再替換
         os.replace(
@@ -231,11 +261,14 @@ def save_state(state):
             state_path
         )
 
+
         print(
             "[STATE] State saved."
         )
 
+
         return True
+
 
     except Exception as e:
 
@@ -253,19 +286,41 @@ STATE = load_state()
 # Rate Limit Functions
 # ============================================================
 
-def is_rate_limited():
-
-    return time.time() < rate_limit_until
-
-
 def get_remaining_cooldown():
 
-    if not is_rate_limited():
+    """
+    回傳 Instagram cooldown 剩餘秒數。
+
+    重要：
+    直接計算 rate_limit_until - time.time()
+    避免 is_rate_limited() 與
+    get_remaining_cooldown() 分開取時間，
+    導致出現：
+
+        cooldown still active: 0s
+
+    然後 sleep(0) 無限循環。
+    """
+
+    remaining = (
+        rate_limit_until
+        - time.time()
+    )
+
+
+    if remaining <= 0:
+
         return 0
 
-    return max(
-        0,
-        int(rate_limit_until - time.time())
+
+    return int(remaining)
+
+
+def is_rate_limited():
+
+    return (
+        get_remaining_cooldown()
+        > 0
     )
 
 
@@ -274,21 +329,32 @@ def trigger_backoff(error=None):
     global rate_limit_until
     global backoff_seconds
 
-    error_text = str(error) if error else ""
 
-    # Instaloader 有時會在錯誤訊息中帶：
+    error_text = (
+        str(error)
+        if error
+        else ""
+    )
+
+
+    # --------------------------------------------------------
+    # 嘗試解析 Instagram 回傳的等待時間
+    #
+    # 例如：
     #
     # wait 666 seconds
-    #
+    # try again in 666
+    # --------------------------------------------------------
+
     instagram_wait = None
 
-    import re
 
     patterns = [
         r"wait\s+(\d+)\s+seconds",
         r"(\d+)\s+seconds",
         r"try again in\s+(\d+)"
     ]
+
 
     for pattern in patterns:
 
@@ -298,31 +364,45 @@ def trigger_backoff(error=None):
             re.IGNORECASE
         )
 
+
         if match:
 
             try:
+
                 instagram_wait = int(
                     match.group(1)
                 )
 
                 break
 
+
             except ValueError:
+
                 pass
 
 
+    # --------------------------------------------------------
+    # 決定 cooldown
+    # --------------------------------------------------------
+
     if instagram_wait:
 
+        # 多留 30 秒 buffer
         wait_time = (
-            instagram_wait + 30
+            instagram_wait
+            + 30
         )
+
 
     else:
 
+        # 沒有 Instagram 指定時間
+        # 使用 exponential backoff + jitter
         jitter = random.randint(
             30,
             120
         )
+
 
         wait_time = (
             backoff_seconds
@@ -336,6 +416,10 @@ def trigger_backoff(error=None):
     )
 
 
+    # --------------------------------------------------------
+    # 設定 cooldown
+    # --------------------------------------------------------
+
     rate_limit_until = (
         time.time()
         + wait_time
@@ -346,18 +430,27 @@ def trigger_backoff(error=None):
     print("=" * 65)
     print("🚨 INSTAGRAM 429 RATE LIMIT")
     print("=" * 65)
+
     print(
         f"⏳ 冷卻時間：{wait_time} 秒"
     )
+
     print(
-        f"🕐 預計恢復："
-        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(rate_limit_until))}"
+        "🕐 預計恢復："
+        f"{time.strftime(
+            '%Y-%m-%d %H:%M:%S',
+            time.localtime(rate_limit_until)
+        )}"
     )
+
     print("=" * 65)
     print("")
 
 
+    # --------------------------------------------------------
     # Exponential Backoff
+    # --------------------------------------------------------
+
     backoff_seconds = min(
         backoff_seconds * 2,
         MAX_BACKOFF
@@ -381,6 +474,7 @@ def get_latest_post(username):
         f"[IG] Loading profile @{username}..."
     )
 
+
     profile = (
         instaloader.Profile
         .from_username(
@@ -389,7 +483,9 @@ def get_latest_post(username):
         )
     )
 
+
     posts = profile.get_posts()
+
 
     return next(
         posts,
@@ -413,7 +509,9 @@ def download_file(
         suffix=extension
     )
 
+
     temp_path = temp_file.name
+
 
     temp_file.close()
 
@@ -424,11 +522,13 @@ def download_file(
             f"[MEDIA] Downloading {extension}..."
         )
 
+
         response = HTTP.get(
             url,
             stream=True,
             timeout=90
         )
+
 
         response.raise_for_status()
 
@@ -446,13 +546,19 @@ def download_file(
             ):
 
                 if not chunk:
+
                     continue
 
 
-                total_size += len(chunk)
+                total_size += len(
+                    chunk
+                )
 
 
+                # ------------------------------------------------
                 # 超過 Discord 保守限制
+                # ------------------------------------------------
+
                 if (
                     total_size
                     > MAX_DISCORD_FILE_SIZE
@@ -463,10 +569,26 @@ def download_file(
                         "File exceeds Discord limit."
                     )
 
+
+                    # 修正：
+                    # 超過大小時立即刪除 temp file
+                    try:
+
+                        os.remove(
+                            temp_path
+                        )
+
+                    except OSError:
+
+                        pass
+
+
                     return None
 
 
-                f.write(chunk)
+                f.write(
+                    chunk
+                )
 
 
         print(
@@ -486,8 +608,13 @@ def download_file(
 
 
         try:
-            os.remove(temp_path)
+
+            os.remove(
+                temp_path
+            )
+
         except OSError:
+
             pass
 
 
@@ -522,7 +649,7 @@ def get_post_media(post):
 
 
             print(
-                f"[MEDIA] "
+                "[MEDIA] "
                 f"Carousel items: "
                 f"{len(children)}"
             )
@@ -533,11 +660,10 @@ def get_post_media(post):
                 start=1
             ):
 
-
                 if child.is_video:
 
                     print(
-                        f"[MEDIA] "
+                        "[MEDIA] "
                         f"#{index}: VIDEO"
                     )
 
@@ -554,7 +680,7 @@ def get_post_media(post):
                 else:
 
                     print(
-                        f"[MEDIA] "
+                        "[MEDIA] "
                         f"#{index}: IMAGE"
                     )
 
@@ -611,7 +737,7 @@ def get_post_media(post):
     except Exception as e:
 
         print(
-            f"[MEDIA] "
+            "[MEDIA] "
             f"取得媒體失敗: {e}"
         )
 
@@ -659,17 +785,21 @@ def send_discord_notification(
         )
 
 
-    media = get_post_media(post)
+    media = get_post_media(
+        post
+    )
 
 
     print(
-        f"[DISCORD] "
+        "[DISCORD] "
         f"Preparing {len(media)} media."
     )
 
 
     temp_files = []
+
     file_handles = []
+
     attachments = []
 
 
@@ -743,7 +873,7 @@ def send_discord_notification(
 
 
             print(
-                f"[DISCORD] "
+                "[DISCORD] "
                 f"Processing media #{index} "
                 f"({media_type})"
             )
@@ -759,7 +889,7 @@ def send_discord_notification(
             if file_path is None:
 
                 print(
-                    f"[DISCORD] "
+                    "[DISCORD] "
                     f"Skipping media #{index}"
                 )
 
@@ -816,10 +946,12 @@ def send_discord_notification(
 
                 })
 
+
             else:
 
                 # Discord 對 attachment video
                 # 可以直接顯示影片檔案
+
                 embeds.append({
 
                     "url":
@@ -834,7 +966,10 @@ def send_discord_notification(
                 })
 
 
+        # ----------------------------------------------------
         # Discord 一次最多 10 個 embeds
+        # ----------------------------------------------------
+
         embeds = embeds[:10]
 
 
@@ -856,6 +991,7 @@ def send_discord_notification(
 
 
         print("")
+
         print(
             "[DISCORD] "
             f"Uploading {len(attachments)} files..."
@@ -879,7 +1015,7 @@ def send_discord_notification(
 
 
         print(
-            f"[DISCORD] "
+            "[DISCORD] "
             f"HTTP {response.status_code}"
         )
 
@@ -902,6 +1038,7 @@ def send_discord_notification(
             "Webhook failed:"
         )
 
+
         print(
             response.text[:2000]
         )
@@ -913,7 +1050,7 @@ def send_discord_notification(
     except requests.exceptions.RequestException as e:
 
         print(
-            f"❌ [DISCORD] "
+            "❌ [DISCORD] "
             f"Request error: {e}"
         )
 
@@ -923,7 +1060,7 @@ def send_discord_notification(
     except Exception as e:
 
         print(
-            f"❌ [DISCORD] "
+            "❌ [DISCORD] "
             f"Unexpected error: {e}"
         )
 
@@ -939,8 +1076,11 @@ def send_discord_notification(
         for file_object in file_handles:
 
             try:
+
                 file_object.close()
+
             except Exception:
+
                 pass
 
 
@@ -951,8 +1091,13 @@ def send_discord_notification(
         for file_path in temp_files:
 
             try:
-                os.remove(file_path)
+
+                os.remove(
+                    file_path
+                )
+
             except OSError:
+
                 pass
 
 
@@ -965,12 +1110,21 @@ def check_account(
     state
 ):
 
+    # --------------------------------------------------------
+    # Global cooldown
+    # --------------------------------------------------------
+
     if is_rate_limited():
+
+        remaining = get_remaining_cooldown()
+
 
         print(
             f"[{username}] "
-            "目前仍在 Instagram cooldown。"
+            "目前仍在 Instagram cooldown，"
+            f"剩餘約 {remaining}s。"
         )
+
 
         return False
 
@@ -978,9 +1132,11 @@ def check_account(
     try:
 
         print("")
+
         print(
             "=" * 60
         )
+
 
         print(
             f"🔍 Checking @{username}"
@@ -1031,6 +1187,7 @@ def check_account(
                 "FIRST RUN."
             )
 
+
             print(
                 f"[{username}] "
                 f"Saving {shortcode} "
@@ -1040,7 +1197,11 @@ def check_account(
 
             state[username] = shortcode
 
-            save_state(state)
+
+            save_state(
+                state
+            )
+
 
             return True
 
@@ -1064,14 +1225,17 @@ def check_account(
         # ----------------------------------------------------
 
         print("")
+
         print(
             "🚨 "
             f"NEW POST @{username}"
         )
 
+
         print(
             f"New: {shortcode}"
         )
+
 
         print(
             f"Old: {previous_shortcode}"
@@ -1089,21 +1253,23 @@ def check_account(
 
 
         # ----------------------------------------------------
-        # VERY IMPORTANT
-        #
-        # Only update state when Discord succeeded.
+        # Only update state when Discord succeeded
         # ----------------------------------------------------
 
         if success:
 
             state[username] = shortcode
 
-            if save_state(state):
+
+            if save_state(
+                state
+            ):
 
                 print(
                     f"✅ [{username}] "
                     "State updated."
                 )
+
 
             else:
 
@@ -1124,10 +1290,12 @@ def check_account(
                 "Discord failed."
             )
 
+
             print(
                 f"⚠️ [{username}] "
                 "State NOT updated."
             )
+
 
             return True
 
@@ -1143,7 +1311,11 @@ def check_account(
             "Instagram returned 429."
         )
 
-        trigger_backoff(e)
+
+        trigger_backoff(
+            e
+        )
+
 
         return False
 
@@ -1156,9 +1328,10 @@ def check_account(
 
         error_text = str(e)
 
+
         print(
             f"❌ [{username}] "
-            f"Instagram connection error: "
+            "Instagram connection error: "
             f"{error_text}"
         )
 
@@ -1175,7 +1348,10 @@ def check_account(
             or "rate" in lower_text
         ):
 
-            trigger_backoff(e)
+            trigger_backoff(
+                e
+            )
+
 
             return False
 
@@ -1194,6 +1370,7 @@ def check_account(
             "Profile does not exist."
         )
 
+
         return True
 
 
@@ -1208,6 +1385,7 @@ def check_account(
             f"Instaloader error: {e}"
         )
 
+
         return True
 
 
@@ -1221,6 +1399,7 @@ def check_account(
             f"❌ [{username}] "
             f"Unexpected error: {e}"
         )
+
 
         return True
 
@@ -1245,16 +1424,20 @@ class HealthCheckHandler(
                 200
             )
 
+
             self.send_header(
                 "Content-Type",
                 "text/plain; charset=utf-8"
             )
 
+
             self.end_headers()
+
 
             self.wfile.write(
                 b"Instagram to Discord Bot is alive."
             )
+
 
             return
 
@@ -1262,6 +1445,7 @@ class HealthCheckHandler(
         self.send_response(
             404
         )
+
 
         self.end_headers()
 
@@ -1296,6 +1480,7 @@ def run_web_server():
 
 
     print("")
+
     print(
         f"🌐 Health Server "
         f"listening on port {port}"
@@ -1312,9 +1497,18 @@ def run_web_server():
 def main():
 
     print("")
-    print("=" * 70)
-    print("Instagram → Discord Monitor")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "Instagram → Discord Monitor"
+    )
+
+    print(
+        "=" * 70
+    )
 
 
     # --------------------------------------------------------
@@ -1350,33 +1544,41 @@ def main():
         f"{len(USERNAMES)}"
     )
 
+
     print(
         f"⏱️ Check interval: "
         f"{CHECK_INTERVAL}s "
         f"({CHECK_INTERVAL / 3600:.1f} hours)"
     )
 
+
     print(
         f"⏳ Account delay: "
         f"{ACCOUNT_DELAY}s"
     )
+
 
     print(
         f"🚨 Initial 429 backoff: "
         f"{INITIAL_BACKOFF}s"
     )
 
+
     print(
         f"🛑 Maximum 429 backoff: "
         f"{MAX_BACKOFF}s"
     )
+
 
     print(
         f"💾 State file: "
         f"{STATE_FILE}"
     )
 
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
 
     # --------------------------------------------------------
@@ -1387,6 +1589,7 @@ def main():
         target=run_web_server,
         daemon=True
     )
+
 
     server_thread.start()
 
@@ -1404,20 +1607,29 @@ def main():
 
         # ====================================================
         # Global Rate Limit
+        #
+        # 重要修正：
+        #
+        # 不再：
+        #
+        # if is_rate_limited():
+        #     remaining = get_remaining_cooldown()
+        #
+        # 而是直接取得 remaining。
+        #
+        # 只有 remaining > 0 才進入 cooldown。
         # ====================================================
 
-        if is_rate_limited():
+        remaining = get_remaining_cooldown()
 
-            remaining = (
-                get_remaining_cooldown()
-            )
 
+        if remaining > 0:
 
             print("")
+
             print(
                 "🛑 Instagram cooldown "
-                f"still active: "
-                f"{remaining}s"
+                f"still active: {remaining}s"
             )
 
 
@@ -1438,11 +1650,16 @@ def main():
         # ====================================================
 
         print("")
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
+
 
         print(
             "⏰ Starting Instagram check cycle"
         )
+
 
         print(
             time.strftime(
@@ -1450,7 +1667,10 @@ def main():
             )
         )
 
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
 
 
         cycle_rate_limited = False
@@ -1464,19 +1684,29 @@ def main():
             USERNAMES
         ):
 
-
             # ------------------------------------------------
             # Check global cooldown
             # ------------------------------------------------
 
-            if is_rate_limited():
+            remaining = get_remaining_cooldown()
+
+
+            if remaining > 0:
 
                 cycle_rate_limited = True
+
 
                 print(
                     "🛑 Rate limit detected. "
                     "Stopping current cycle."
                 )
+
+
+                print(
+                    f"⏳ Remaining cooldown: "
+                    f"{remaining}s"
+                )
+
 
                 break
 
@@ -1499,16 +1729,21 @@ def main():
 
                 cycle_rate_limited = True
 
+
                 print("")
+
+
                 print(
                     "🛑 Instagram rate limit "
                     "detected."
                 )
 
+
                 print(
                     "🛑 Stopping current cycle "
                     "to avoid further requests."
                 )
+
 
                 break
 
@@ -1528,6 +1763,7 @@ def main():
                     "before next account..."
                 )
 
+
                 time.sleep(
                     ACCOUNT_DELAY
                 )
@@ -1540,15 +1776,27 @@ def main():
         if cycle_rate_limited:
 
             print("")
+
+
             print(
                 "🚨 Current cycle stopped "
                 "because of rate limit."
             )
 
+
             print(
                 "⏳ Waiting for cooldown..."
             )
 
+
+            # 不 sleep。
+            #
+            # 下一輪會由最上面的：
+            #
+            # remaining = get_remaining_cooldown()
+            #
+            # 統一處理 cooldown。
+            #
             continue
 
 
@@ -1560,12 +1808,17 @@ def main():
 
 
         print("")
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
+
 
         print(
             f"✅ Finished checking "
             f"{len(USERNAMES)} accounts."
         )
+
 
         print(
             f"😴 Sleeping "
@@ -1573,7 +1826,10 @@ def main():
             f"({CHECK_INTERVAL / 3600:.1f} hours)"
         )
 
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
 
 
         time.sleep(

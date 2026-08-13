@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-# ============================================================
-# Instagram → Discord Monitor
-#
-# Render Production Final Version
-#
-# Features:
-#   - Multiple Instagram accounts
-#   - Base64 Instagram Session support
-#   - Instagram Session verification
-#   - NO anonymous fallback
-#   - 429 automatic global cooldown
-#   - Exponential backoff
-#   - Random jitter
-#   - Persistent cooldown
-#   - Persistent post state
-#   - Discord Webhook
-#   - Image / Video / Carousel
-#   - Render Health Check
-#   - Atomic state write
-#   - Graceful shutdown
-#   - Diagnostic startup logging
-# ============================================================
+"""
+Instagram -> Discord Monitor
+Render Production Final Version
 
+Features:
+- Multiple Instagram accounts
+- Instagram authenticated session
+- Base64 session support for Render Secret File
+- Instagram 429 global cooldown
+- Exponential backoff
+- Random jitter
+- Persistent cooldown
+- Persistent post state
+- Discord Webhook
+- Image / Video / Carousel
+- Render health check
+- Atomic state write
+- Graceful shutdown
+- Diagnostic startup logging
+"""
 
 # ============================================================
 # BOOT
@@ -36,7 +34,6 @@ print("BOOT: Python process started", flush=True)
 # ============================================================
 
 import base64
-import binascii
 import json
 import os
 import random
@@ -47,11 +44,13 @@ import tempfile
 import threading
 import time
 
+print("BOOT: standard libraries imported", flush=True)
+
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-
-print("BOOT: standard libraries imported", flush=True)
+print("BOOT: HTTP modules imported", flush=True)
 
 
 # ============================================================
@@ -87,7 +86,8 @@ print(
 RAW_USERNAMES = os.environ.get(
     "IG_USERNAME",
     "",
-)
+).strip()
+
 
 USERNAMES = [
     username.strip()
@@ -95,10 +95,6 @@ USERNAMES = [
     if username.strip()
 ]
 
-
-# ============================================================
-# Discord
-# ============================================================
 
 WEBHOOK_URL = os.environ.get(
     "INSTAGRAM_POST_WEBHOOK",
@@ -117,47 +113,51 @@ CHECK_INTERVAL = int(
     os.environ.get(
         "CHECK_INTERVAL",
         "7200",
-    ),
+    )
 )
+
 
 ACCOUNT_DELAY = int(
     os.environ.get(
         "ACCOUNT_DELAY",
         "120",
-    ),
+    )
 )
 
 
 # ============================================================
-# Instagram Rate Limit
+# Instagram Backoff
 # ============================================================
 
 INITIAL_BACKOFF = int(
     os.environ.get(
         "INITIAL_BACKOFF",
         "1200",
-    ),
+    )
 )
+
 
 MAX_BACKOFF = int(
     os.environ.get(
         "MAX_BACKOFF",
         "21600",
-    ),
+    )
 )
+
 
 BACKOFF_JITTER_MIN = int(
     os.environ.get(
         "BACKOFF_JITTER_MIN",
         "30",
-    ),
+    )
 )
+
 
 BACKOFF_JITTER_MAX = int(
     os.environ.get(
         "BACKOFF_JITTER_MAX",
         "120",
-    ),
+    )
 )
 
 
@@ -168,7 +168,8 @@ BACKOFF_JITTER_MAX = int(
 STATE_FILE = os.environ.get(
     "STATE_FILE",
     "last_posts.json",
-)
+).strip()
+
 
 PERSIST_COOLDOWN = (
     os.environ.get(
@@ -182,24 +183,21 @@ PERSIST_COOLDOWN = (
 # ============================================================
 # Instagram Session
 #
-# Render:
+# Render 建議：
 #
 # IG_SESSION_USERNAME=aderiii_1225
 #
 # IG_SESSION_FILE=/etc/secrets/aderiii_1225.session.b64
 #
-# Secret File:
-#
-# aderiii_1225.session.b64
-#
-# Contents:
-# Base64 encoded Instaloader .session file
+# Secret File 內容：
+# 本機 session 檔案轉成 Base64 後的文字
 # ============================================================
 
 IG_SESSION_USERNAME = os.environ.get(
     "IG_SESSION_USERNAME",
     "",
 ).strip()
+
 
 IG_SESSION_FILE = os.environ.get(
     "IG_SESSION_FILE",
@@ -208,21 +206,22 @@ IG_SESSION_FILE = os.environ.get(
 
 
 # ============================================================
-# Discord File Limit
+# Discord
 # ============================================================
 
 MAX_DISCORD_FILE_SIZE = int(
     os.environ.get(
         "MAX_DISCORD_FILE_SIZE",
         "9500000",
-    ),
+    )
 )
+
 
 MAX_MEDIA_ITEMS = 9
 
 
 # ============================================================
-# Global Runtime State
+# Global State
 # ============================================================
 
 shutdown_requested = False
@@ -244,7 +243,7 @@ CYCLE_LOCK = threading.Lock()
 
 
 # ============================================================
-# Custom 429 Exception
+# Custom Exception
 # ============================================================
 
 class InstagramRateLimited(Exception):
@@ -254,28 +253,25 @@ class InstagramRateLimited(Exception):
         message,
         wait_seconds=None,
     ):
-
         super().__init__(message)
-
         self.wait_seconds = wait_seconds
 
 
 # ============================================================
-# Custom Rate Controller
+# Rate Controller
 # ============================================================
 
 class AbortOn429RateController(
     instaloader.RateController
 ):
     """
-    Immediately stop when Instagram returns HTTP 429.
+    Instagram 429 時立即交給主程式處理。
     """
 
     def handle_429(
         self,
         query_type,
     ):
-
         raise InstagramRateLimited(
             "Instagram HTTP 429 Too Many Requests "
             f"(query_type={query_type})"
@@ -283,25 +279,23 @@ class AbortOn429RateController(
 
 
 # ============================================================
-# HTTP Session
+# HTTP
 # ============================================================
 
 HTTP = requests.Session()
 
-HTTP.headers.update({
-
-    "User-Agent": (
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/151.0 Safari/537.36"
-    ),
-
-    "Accept-Language":
-        "en-US,en;q=0.9",
-
-})
+HTTP.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+)
 
 
 # ============================================================
@@ -315,30 +309,19 @@ print(
 
 
 L = instaloader.Instaloader(
-
     download_pictures=False,
-
     download_videos=False,
-
     download_video_thumbnails=False,
-
     download_geotags=False,
-
     download_comments=False,
-
     save_metadata=False,
-
     compress_json=False,
-
     max_connection_attempts=1,
-
     request_timeout=60,
-
     rate_controller=(
         lambda context:
         AbortOn429RateController(context)
     ),
-
 )
 
 
@@ -353,7 +336,6 @@ print(
 # ============================================================
 
 def format_seconds(seconds):
-
     seconds = max(
         0,
         int(seconds),
@@ -362,14 +344,12 @@ def format_seconds(seconds):
     hours = seconds // 3600
 
     minutes = (
-        (seconds % 3600)
-        // 60
-    )
+        seconds % 3600
+    ) // 60
 
     secs = seconds % 60
 
     if hours > 0:
-
         return (
             f"{hours}h "
             f"{minutes}m "
@@ -377,7 +357,6 @@ def format_seconds(seconds):
         )
 
     if minutes > 0:
-
         return (
             f"{minutes}m "
             f"{secs}s"
@@ -403,7 +382,6 @@ def sleep_interruptible(seconds):
         remaining > 0
         and not shutdown_requested
     ):
-
         chunk = min(
             remaining,
             1.0,
@@ -428,8 +406,9 @@ def load_state():
         flush=True,
     )
 
-    if not os.path.exists(STATE_FILE):
-
+    if not os.path.exists(
+        STATE_FILE
+    ):
         print(
             f"[STATE] {STATE_FILE} 不存在。",
             flush=True,
@@ -456,17 +435,12 @@ def load_state():
             raw_data,
             dict,
         ):
-
             print(
                 "[STATE] State 格式錯誤，重設。",
                 flush=True,
             )
 
             return {}
-
-        # ----------------------------------------------------
-        # New format
-        # ----------------------------------------------------
 
         if "_meta" in raw_data:
 
@@ -475,48 +449,33 @@ def load_state():
                 {},
             )
 
-            if not isinstance(
-                meta,
-                dict,
-            ):
-
-                meta = {}
-
             if PERSIST_COOLDOWN:
 
                 try:
-
                     saved_until = float(
                         meta.get(
                             "rate_limit_until",
                             0.0,
                         )
                     )
-
                 except (
                     TypeError,
                     ValueError,
                 ):
-
                     saved_until = 0.0
 
                 try:
-
                     saved_backoff = int(
                         meta.get(
                             "backoff_seconds",
                             INITIAL_BACKOFF,
                         )
                     )
-
                 except (
                     TypeError,
                     ValueError,
                 ):
-
-                    saved_backoff = (
-                        INITIAL_BACKOFF
-                    )
+                    saved_backoff = INITIAL_BACKOFF
 
                 saved_backoff = min(
                     max(
@@ -561,23 +520,17 @@ def load_state():
 
         else:
 
-            # ------------------------------------------------
-            # Backward compatibility
-            # ------------------------------------------------
-
             posts_state = raw_data
 
         if not isinstance(
             posts_state,
             dict,
         ):
-
             posts_state = {}
 
         print(
             "[STATE] 已載入 "
-            f"{len(posts_state)} "
-            "個帳號紀錄。",
+            f"{len(posts_state)} 個帳號紀錄。",
             flush=True,
         )
 
@@ -603,7 +556,7 @@ def save_state(posts_state):
     try:
 
         state_path = Path(
-            STATE_FILE,
+            STATE_FILE
         )
 
         parent = state_path.parent
@@ -612,7 +565,6 @@ def save_state(posts_state):
             "",
             ".",
         ):
-
             parent.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -629,40 +581,28 @@ def save_state(posts_state):
             )
 
         data = {
-
             "_meta": {
-
                 "rate_limit_until": (
                     current_until
                     if PERSIST_COOLDOWN
                     else 0.0
                 ),
-
                 "backoff_seconds": (
                     current_backoff
                     if PERSIST_COOLDOWN
                     else INITIAL_BACKOFF
                 ),
-
-                "updated_at":
+                "updated_at": (
                     time.strftime(
-                        "%Y-%m-%d %H:%M:%S",
-                    ),
-
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                ),
             },
-
-            "posts":
-                dict(posts_state),
-
+            "posts": dict(posts_state),
         }
 
-        # ----------------------------------------------------
-        # Atomic write
-        # ----------------------------------------------------
-
         temp_path = state_path.with_name(
-            state_path.name
-            + ".tmp"
+            state_path.name + ".tmp"
         )
 
         with open(
@@ -681,7 +621,7 @@ def save_state(posts_state):
             file.flush()
 
             os.fsync(
-                file.fileno(),
+                file.fileno()
             )
 
         os.replace(
@@ -738,7 +678,6 @@ def get_remaining_cooldown():
         )
 
     if remaining <= 0:
-
         return 0
 
     return max(
@@ -750,29 +689,22 @@ def get_remaining_cooldown():
 
 
 # ============================================================
-# Extract Wait Time
+# Extract Wait
 # ============================================================
 
 def extract_wait_seconds(error):
 
     if not error:
-
         return None
 
     text = str(error)
 
     patterns = [
-
         r"wait\s+(\d+)\s+seconds",
-
         r"wait\s+(\d+)\s+second",
-
         r"try again in\s+(\d+)",
-
         r"in\s+(\d+)\s+seconds",
-
         r"in\s+(\d+)\s+second",
-
     ]
 
     for pattern in patterns:
@@ -786,16 +718,13 @@ def extract_wait_seconds(error):
         if match:
 
             try:
-
                 return int(
-                    match.group(1),
+                    match.group(1)
                 )
-
             except (
                 TypeError,
                 ValueError,
             ):
-
                 pass
 
     return None
@@ -819,7 +748,7 @@ def trigger_backoff(
 
         wait_time = (
             extract_wait_seconds(
-                error,
+                error
             )
         )
 
@@ -838,7 +767,7 @@ def trigger_backoff(
     try:
 
         wait_time = int(
-            wait_time,
+            wait_time
         )
 
     except (
@@ -846,9 +775,7 @@ def trigger_backoff(
         ValueError,
     ):
 
-        wait_time = (
-            INITIAL_BACKOFF
-        )
+        wait_time = INITIAL_BACKOFF
 
     wait_time = max(
         1,
@@ -868,14 +795,11 @@ def trigger_backoff(
         )
 
         backoff_seconds = min(
-
             max(
                 INITIAL_BACKOFF,
                 backoff_seconds * 2,
             ),
-
             MAX_BACKOFF,
-
         )
 
         cooldown_until = (
@@ -886,7 +810,10 @@ def trigger_backoff(
             backoff_seconds
         )
 
-    print("", flush=True)
+    print(
+        "",
+        flush=True,
+    )
 
     print(
         "=" * 70,
@@ -909,7 +836,7 @@ def trigger_backoff(
         + time.strftime(
             "%Y-%m-%d %H:%M:%S",
             time.localtime(
-                cooldown_until,
+                cooldown_until
             ),
         ),
         flush=True,
@@ -953,9 +880,128 @@ def reset_backoff():
 # Instagram Session
 # ============================================================
 
+def decode_session_file(
+    source_path,
+):
+
+    """
+    Render Secret File 通常適合儲存文字。
+    Instaloader session file 可能包含 binary data。
+
+    因此支援：
+
+    1. 原始 binary session
+    2. Base64 encoded session
+
+    如果是 Base64：
+        source_path
+            ->
+        /tmp/instagram_session.session
+    """
+
+    print(
+        "[IG] 準備處理 Session File...",
+        flush=True,
+    )
+
+    if not os.path.exists(
+        source_path
+    ):
+        raise FileNotFoundError(
+            f"Session file 不存在：{source_path}"
+        )
+
+    with open(
+        source_path,
+        "rb",
+    ) as file:
+
+        raw = file.read()
+
+    if not raw:
+        raise ValueError(
+            "Session file 是空的。"
+        )
+
+    print(
+        "[IG] Session source size："
+        f"{len(raw)} bytes",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # Try Base64
+    # --------------------------------------------------------
+
+    compact = b"".join(
+        raw.split()
+    )
+
+    try:
+
+        decoded = base64.b64decode(
+            compact,
+            validate=True,
+        )
+
+        # Base64 解碼後不能是空
+        if decoded:
+
+            decoded_path = os.path.join(
+                tempfile.gettempdir(),
+                "instagram_render_session.session",
+            )
+
+            with open(
+                decoded_path,
+                "wb",
+            ) as file:
+
+                file.write(
+                    decoded
+                )
+
+            print(
+                "[IG] ✅ 偵測到 Base64 Session。",
+                flush=True,
+            )
+
+            print(
+                "[IG] Decoded session size："
+                f"{len(decoded)} bytes",
+                flush=True,
+            )
+
+            print(
+                "[IG] Decoded session path："
+                f"{decoded_path}",
+                flush=True,
+            )
+
+            return decoded_path
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Otherwise assume raw session
+    # --------------------------------------------------------
+
+    print(
+        "[IG] 未偵測到 Base64，"
+        "嘗試直接使用原始 Session。",
+        flush=True,
+    )
+
+    return source_path
+
+
 def load_instagram_session():
 
-    print("", flush=True)
+    print(
+        "",
+        flush=True,
+    )
 
     print(
         "=" * 70,
@@ -971,22 +1017,6 @@ def load_instagram_session():
         "=" * 70,
         flush=True,
     )
-
-    print(
-        f"🔐 Session Username："
-        f"{IG_SESSION_USERNAME}",
-        flush=True,
-    )
-
-    print(
-        f"🔐 Session File："
-        f"{IG_SESSION_FILE}",
-        flush=True,
-    )
-
-    # --------------------------------------------------------
-    # Validate configuration
-    # --------------------------------------------------------
 
     if not IG_SESSION_USERNAME:
 
@@ -1006,12 +1036,20 @@ def load_instagram_session():
 
         return False
 
-    # --------------------------------------------------------
-    # Check file
-    # --------------------------------------------------------
+    print(
+        "🔐 Session Username："
+        f"{IG_SESSION_USERNAME}",
+        flush=True,
+    )
+
+    print(
+        "🔐 Session File："
+        f"{IG_SESSION_FILE}",
+        flush=True,
+    )
 
     if not os.path.exists(
-        IG_SESSION_FILE,
+        IG_SESSION_FILE
     ):
 
         print(
@@ -1020,193 +1058,49 @@ def load_instagram_session():
         )
 
         print(
-            f"Session file 不存在："
+            "Session file 不存在："
             f"{IG_SESSION_FILE}",
             flush=True,
         )
 
         return False
 
-    temp_session_path = None
-
     try:
 
-        print(
-            "🔐 正在讀取 Base64 Session...",
-            flush=True,
-        )
-
-        with open(
-            IG_SESSION_FILE,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            encoded_session = file.read()
-
-        encoded_session = (
-            encoded_session.strip()
-        )
-
-        if not encoded_session:
-
-            print(
-                "❌ Session Base64 檔案是空的。",
-                flush=True,
+        actual_session_file = (
+            decode_session_file(
+                IG_SESSION_FILE
             )
-
-            return False
+        )
 
         print(
-            "🔐 Base64 長度："
-            f"{len(encoded_session)}",
-            flush=True,
-        )
-
-        # ----------------------------------------------------
-        # Decode Base64
-        # ----------------------------------------------------
-
-        try:
-
-            session_bytes = (
-                base64.b64decode(
-                    encoded_session,
-                    validate=False,
-                )
-            )
-
-        except (
-            ValueError,
-            binascii.Error,
-        ) as error:
-
-            print(
-                "❌ Base64 decode 失敗："
-                f"{error}",
-                flush=True,
-            )
-
-            return False
-
-        if not session_bytes:
-
-            print(
-                "❌ Base64 decode 後沒有資料。",
-                flush=True,
-            )
-
-            return False
-
-        print(
-            "🔐 Decode 後 Session 大小："
-            f"{len(session_bytes)} bytes",
-            flush=True,
-        )
-
-        # ----------------------------------------------------
-        # Create temporary binary session
-        # ----------------------------------------------------
-
-        temp_session = tempfile.NamedTemporaryFile(
-            prefix="instagram_session_",
-            suffix=".session",
-            delete=False,
-        )
-
-        temp_session_path = (
-            temp_session.name
-        )
-
-        try:
-
-            temp_session.write(
-                session_bytes
-            )
-
-            temp_session.flush()
-
-            os.fsync(
-                temp_session.fileno()
-            )
-
-        finally:
-
-            temp_session.close()
-
-        print(
-            "🔐 Session 已還原至："
-            f"{temp_session_path}",
-            flush=True,
-        )
-
-        # ----------------------------------------------------
-        # Load session
-        # ----------------------------------------------------
-
-        print(
-            "🔐 正在載入 Instaloader Session...",
+            "[IG] 正在載入 Instaloader Session...",
             flush=True,
         )
 
         L.load_session_from_file(
             IG_SESSION_USERNAME,
-            temp_session_path,
+            actual_session_file,
         )
 
         print(
-            "✅ Instaloader Session 載入成功。",
-            flush=True,
-        )
-
-        # ----------------------------------------------------
-        # Test login
-        # ----------------------------------------------------
-
-        print(
-            "🔐 正在驗證 Instagram Login...",
-            flush=True,
-        )
-
-        logged_in_username = (
-            L.test_login()
-        )
-
-        if not logged_in_username:
-
-            print(
-                "❌ Session 載入成功，"
-                "但 Instagram Login 驗證失敗。",
-                flush=True,
-            )
-
-            return False
-
-        print(
-            "✅ Instagram Login 驗證成功。",
+            "✅ INSTAGRAM SESSION LOADED",
             flush=True,
         )
 
         print(
-            f"👤 Logged in as: "
-            f"{logged_in_username}",
+            "[IG] Instagram authenticated mode ENABLED。",
             flush=True,
         )
-
-        if (
-            logged_in_username.lower()
-            != IG_SESSION_USERNAME.lower()
-        ):
-
-            print(
-                "⚠️ Session 登入帳號與 "
-                "IG_SESSION_USERNAME 不一致。",
-                flush=True,
-            )
 
         return True
 
     except Exception as error:
+
+        print(
+            "",
+            flush=True,
+        )
 
         print(
             "❌ INSTAGRAM SESSION ERROR",
@@ -1214,45 +1108,37 @@ def load_instagram_session():
         )
 
         print(
-            f"Session 載入失敗：{error}",
+            "Session 載入失敗："
+            f"{error}",
+            flush=True,
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "⚠️ Instagram authenticated mode "
+            "NOT ENABLED。",
+            flush=True,
+        )
+
+        print(
+            "⚠️ 程式不會把 Session 錯誤當成成功。",
             flush=True,
         )
 
         return False
-
-    finally:
-
-        if temp_session_path:
-
-            try:
-
-                if os.path.exists(
-                    temp_session_path
-                ):
-
-                    os.remove(
-                        temp_session_path
-                    )
-
-                    print(
-                        "🔐 暫存 Session 已刪除。",
-                        flush=True,
-                    )
-
-            except Exception as error:
-
-                print(
-                    "⚠️ 暫存 Session 清理失敗："
-                    f"{error}",
-                    flush=True,
-                )
 
 
 # ============================================================
 # Get Latest Post
 # ============================================================
 
-def get_latest_post(username):
+def get_latest_post(
+    username,
+):
 
     print(
         f"[IG] 取得 @{username} profile...",
@@ -1335,7 +1221,6 @@ def download_file(
             ):
 
                 if not chunk:
-
                     continue
 
                 total_size += len(
@@ -1348,24 +1233,22 @@ def download_file(
                 ):
 
                     print(
-                        "[MEDIA] 檔案超過 Discord "
-                        "安全上限，跳過。",
+                        "[MEDIA] 檔案超過 Discord 上限，跳過。",
                         flush=True,
                     )
 
                     try:
-
                         os.remove(
                             temp_path
                         )
-
                     except OSError:
-
                         pass
 
                     return None
 
-                file.write(chunk)
+                file.write(
+                    chunk
+                )
 
         print(
             "[MEDIA] 下載完成："
@@ -1384,20 +1267,17 @@ def download_file(
         )
 
         try:
-
             os.remove(
-                temp_path,
+                temp_path
             )
-
         except OSError:
-
             pass
 
         return None
 
 
 # ============================================================
-# Get Post Media
+# Post Media
 # ============================================================
 
 def get_post_media(post):
@@ -1410,10 +1290,7 @@ def get_post_media(post):
         # Carousel
         # ----------------------------------------------------
 
-        if (
-            post.typename
-            == "GraphSidecar"
-        ):
+        if post.typename == "GraphSidecar":
 
             print(
                 "[MEDIA] Type: CAROUSEL",
@@ -1440,36 +1317,26 @@ def get_post_media(post):
                     and child.video_url
                 ):
 
-                    media.append({
-
-                        "type":
-                            "video",
-
-                        "url":
-                            child.video_url,
-
-                        "index":
-                            index,
-
-                    })
+                    media.append(
+                        {
+                            "type": "video",
+                            "url": child.video_url,
+                            "index": index,
+                        }
+                    )
 
                 elif child.display_url:
 
-                    media.append({
-
-                        "type":
-                            "image",
-
-                        "url":
-                            child.display_url,
-
-                        "index":
-                            index,
-
+                    media.append(
+                        {
+                            "type": "image",
+                            "url": child.display_url,
+                            "index": index,
+                        }
                     )
 
         # ----------------------------------------------------
-        # Video
+        # Single Video
         # ----------------------------------------------------
 
         elif (
@@ -1482,21 +1349,16 @@ def get_post_media(post):
                 flush=True,
             )
 
-            media.append({
-
-                "type":
-                    "video",
-
-                "url":
-                    post.video_url,
-
-                "index":
-                    1,
-
-            })
+            media.append(
+                {
+                    "type": "video",
+                    "url": post.video_url,
+                    "index": 1,
+                }
+            )
 
         # ----------------------------------------------------
-        # Image
+        # Single Image
         # ----------------------------------------------------
 
         elif post.url:
@@ -1506,18 +1368,13 @@ def get_post_media(post):
                 flush=True,
             )
 
-            media.append({
-
-                "type":
-                    "image",
-
-                "url":
-                    post.url,
-
-                "index":
-                    1,
-
-            })
+            media.append(
+                {
+                    "type": "image",
+                    "url": post.url,
+                    "index": 1,
+                }
+            )
 
     except Exception as error:
 
@@ -1531,7 +1388,7 @@ def get_post_media(post):
 
 
 # ============================================================
-# Discord Notification
+# Discord
 # ============================================================
 
 def send_discord_notification(
@@ -1586,30 +1443,23 @@ def send_discord_notification(
 
         embeds = []
 
-        embeds.append({
-
-            "title":
-                f"📸 @{username} 發布了新貼文！",
-
-            "url":
-                post_url,
-
-            "description":
-                caption,
-
-            "color":
-                15467852,
-
-            "footer": {
-                "text":
-                    "Instagram → Discord",
-            },
-
-        })
-
-        # ----------------------------------------------------
-        # Download media
-        # ----------------------------------------------------
+        embeds.append(
+            {
+                "title":
+                    f"📸 @{username} 發布了新貼文！",
+                "url":
+                    post_url,
+                "description":
+                    caption,
+                "color":
+                    15467852,
+                "footer":
+                    {
+                        "text":
+                            "Instagram → Discord"
+                    },
+            }
+        )
 
         for item in media:
 
@@ -1625,9 +1475,7 @@ def send_discord_notification(
                     f"instagram_{index}.mp4"
                 )
 
-                mime_type = (
-                    "video/mp4"
-                )
+                mime_type = "video/mp4"
 
             else:
 
@@ -1637,9 +1485,7 @@ def send_discord_notification(
                     f"instagram_{index}.jpg"
                 )
 
-                mime_type = (
-                    "image/jpeg"
-                )
+                mime_type = "image/jpeg"
 
             print(
                 "[DISCORD] 處理 media #"
@@ -1648,13 +1494,9 @@ def send_discord_notification(
             )
 
             file_path = download_file(
-
                 item["url"],
-
                 extension,
-
                 "ig_",
-
             )
 
             if not file_path:
@@ -1681,67 +1523,53 @@ def send_discord_notification(
             )
 
             attachments.append(
-
                 (
                     "files[]",
-
                     (
                         filename,
                         file_object,
                         mime_type,
                     ),
-
                 )
-
             )
 
             if media_type == "image":
 
-                embeds.append({
-
-                    "url":
-                        post_url,
-
-                    "image": {
-
+                embeds.append(
+                    {
                         "url":
-                            "attachment://"
-                            f"{filename}",
-
-                    },
-
-                    "color":
-                        15467852,
-
-                })
+                            post_url,
+                        "image":
+                            {
+                                "url":
+                                    "attachment://"
+                                    f"{filename}"
+                            },
+                        "color":
+                            15467852,
+                    }
+                )
 
             else:
 
-                embeds.append({
-
-                    "url":
-                        post_url,
-
-                    "description":
-                        f"🎬 影片內容 #{index}",
-
-                    "color":
-                        15467852,
-
-                })
-
-        # Discord max 10 embeds
+                embeds.append(
+                    {
+                        "url":
+                            post_url,
+                        "description":
+                            f"🎬 影片內容 #{index}",
+                        "color":
+                            15467852,
+                    }
+                )
 
         embeds = embeds[:10]
 
         payload = {
-
             "username":
                 "Instagram 通知",
-
             "embeds":
                 embeds,
-
         }
 
         payload_json = json.dumps(
@@ -1756,20 +1584,13 @@ def send_discord_notification(
         )
 
         response = HTTP.post(
-
             WEBHOOK_URL,
-
             data={
-
                 "payload_json":
                     payload_json,
-
             },
-
             files=attachments,
-
             timeout=180,
-
         )
 
         print(
@@ -1793,7 +1614,7 @@ def send_discord_notification(
         if response.status_code == 429:
 
             print(
-                "⚠️ [DISCORD] Webhook 遇到 429。",
+                "⚠️ [DISCORD] Webhook 429。",
                 flush=True,
             )
 
@@ -1842,23 +1663,17 @@ def send_discord_notification(
         for file_object in file_handles:
 
             try:
-
                 file_object.close()
-
             except Exception:
-
                 pass
 
         for file_path in temp_files:
 
             try:
-
                 os.remove(
-                    file_path,
+                    file_path
                 )
-
             except OSError:
-
                 pass
 
 
@@ -1882,7 +1697,10 @@ def check_account(
 
     try:
 
-        print("", flush=True)
+        print(
+            "",
+            flush=True,
+        )
 
         print(
             "=" * 60,
@@ -1898,10 +1716,6 @@ def check_account(
             "=" * 60,
             flush=True,
         )
-
-        # ----------------------------------------------------
-        # Latest post
-        # ----------------------------------------------------
 
         post = get_latest_post(
             username
@@ -1933,7 +1747,7 @@ def check_account(
         )
 
         # ----------------------------------------------------
-        # First run
+        # First Run
         # ----------------------------------------------------
 
         if previous_shortcode is None:
@@ -1944,32 +1758,26 @@ def check_account(
             )
 
             print(
-                f"[{username}] 記錄 "
-                f"{shortcode}，"
+                f"[{username}] 記錄 {shortcode}，"
                 "不發 Discord。",
                 flush=True,
             )
 
             with STATE_LOCK:
 
-                state[
-                    username
-                ] = shortcode
+                state[username] = (
+                    shortcode
+                )
 
-            save_state(
-                state
-            )
+            save_state(state)
 
             return "SUCCESS"
 
         # ----------------------------------------------------
-        # No new post
+        # No New Post
         # ----------------------------------------------------
 
-        if (
-            previous_shortcode
-            == shortcode
-        ):
+        if previous_shortcode == shortcode:
 
             print(
                 f"[{username}] 沒有新貼文。",
@@ -1979,14 +1787,16 @@ def check_account(
             return "SUCCESS"
 
         # ----------------------------------------------------
-        # New post
+        # New Post
         # ----------------------------------------------------
 
-        print("", flush=True)
+        print(
+            "",
+            flush=True,
+        )
 
         print(
-            "🚨 NEW POST "
-            f"@{username}",
+            f"🚨 NEW POST @{username}",
             flush=True,
         )
 
@@ -2000,45 +1810,34 @@ def check_account(
             flush=True,
         )
 
-        # ----------------------------------------------------
-        # Discord
-        # ----------------------------------------------------
-
         success = send_discord_notification(
-
             username,
-
             post,
-
         )
 
         # ----------------------------------------------------
-        # Update state only after Discord success
+        # Discord success
         # ----------------------------------------------------
 
         if success:
 
             with STATE_LOCK:
 
-                state[
-                    username
-                ] = shortcode
+                state[username] = (
+                    shortcode
+                )
 
-            if save_state(
-                state
-            ):
+            if save_state(state):
 
                 print(
-                    f"✅ [{username}] "
-                    "State updated。",
+                    f"✅ [{username}] State updated。",
                     flush=True,
                 )
 
             else:
 
                 print(
-                    f"⚠️ [{username}] "
-                    "Discord 已成功，"
+                    f"⚠️ [{username}] Discord 已成功，"
                     "但 State 儲存失敗。",
                     flush=True,
                 )
@@ -2050,14 +1849,12 @@ def check_account(
         # ----------------------------------------------------
 
         print(
-            f"❌ [{username}] "
-            "Discord 發送失敗。",
+            f"❌ [{username}] Discord 發送失敗。",
             flush=True,
         )
 
         print(
-            f"⚠️ [{username}] "
-            "State 不更新。",
+            f"⚠️ [{username}] State 不更新。",
             flush=True,
         )
 
@@ -2069,11 +1866,13 @@ def check_account(
 
     except InstagramRateLimited as error:
 
-        print("", flush=True)
+        print(
+            "",
+            flush=True,
+        )
 
         print(
-            f"🚨 [{username}] "
-            "Instagram 429 被攔截。",
+            f"🚨 [{username}] Instagram 429 被攔截。",
             flush=True,
         )
 
@@ -2084,9 +1883,7 @@ def check_account(
 
         trigger_backoff(
             error,
-            override_wait=(
-                error.wait_seconds
-            ),
+            override_wait=error.wait_seconds,
         )
 
         return "RATE_LIMITED"
@@ -2096,16 +1893,16 @@ def check_account(
     # ========================================================
 
     except (
-        instaloader
-        .exceptions
-        .TooManyRequestsException
+        instaloader.exceptions.TooManyRequestsException
     ) as error:
 
-        print("", flush=True)
+        print(
+            "",
+            flush=True,
+        )
 
         print(
-            f"🚨 [{username}] "
-            "Instagram 429 Too Many Requests。",
+            f"🚨 [{username}] Instagram 429。",
             flush=True,
         )
 
@@ -2120,9 +1917,7 @@ def check_account(
     # ========================================================
 
     except (
-        instaloader
-        .exceptions
-        .ConnectionException
+        instaloader.exceptions.ConnectionException
     ) as error:
 
         error_text = str(error)
@@ -2132,22 +1927,11 @@ def check_account(
         )
 
         if (
-
-            "429"
-            in error_text
-
-            or "too many"
-            in lower_text
-
-            or "rate limit"
-            in lower_text
-
-            or "rate-limit"
-            in lower_text
-
-            or "rate limited"
-            in lower_text
-
+            "429" in error_text
+            or "too many" in lower_text
+            or "rate limit" in lower_text
+            or "rate-limit" in lower_text
+            or "rate limited" in lower_text
         ):
 
             print(
@@ -2176,27 +1960,22 @@ def check_account(
     # ========================================================
 
     except (
-        instaloader
-        .exceptions
-        .ProfileNotExistsException
+        instaloader.exceptions.ProfileNotExistsException
     ):
 
         print(
-            f"⚠️ [{username}] "
-            "Profile 不存在。",
+            f"⚠️ [{username}] Profile 不存在。",
             flush=True,
         )
 
         return "ERROR"
 
     # ========================================================
-    # Other Instaloader error
+    # Other Instaloader
     # ========================================================
 
     except (
-        instaloader
-        .exceptions
-        .InstaloaderException
+        instaloader.exceptions.InstaloaderException
     ) as error:
 
         error_text = str(error)
@@ -2206,27 +1985,16 @@ def check_account(
         )
 
         if (
-
-            "429"
-            in error_text
-
-            or "too many"
-            in lower_text
-
-            or "rate limit"
-            in lower_text
-
-            or "rate-limit"
-            in lower_text
-
-            or "rate limited"
-            in lower_text
-
+            "429" in error_text
+            or "too many" in lower_text
+            or "rate limit" in lower_text
+            or "rate-limit" in lower_text
+            or "rate limited" in lower_text
         ):
 
             print(
                 f"🚨 [{username}] "
-                "Instaloader 回報 Rate Limit。",
+                "Instaloader Rate Limit。",
                 flush=True,
             )
 
@@ -2258,24 +2026,14 @@ def check_account(
         )
 
         if (
-
-            "429"
-            in error_text
-
-            or "too many requests"
-            in lower_text
-
-            or "rate limit"
-            in lower_text
-
-            or "rate-limit"
-            in lower_text
-
+            "429" in error_text
+            or "too many requests" in lower_text
+            or "rate limit" in lower_text
         ):
 
             print(
                 f"🚨 [{username}] "
-                "Unexpected error 但疑似 429。",
+                "疑似 Instagram 429。",
                 flush=True,
             )
 
@@ -2286,8 +2044,7 @@ def check_account(
             return "RATE_LIMITED"
 
         print(
-            f"❌ [{username}] "
-            "Unexpected error："
+            f"❌ [{username}] Unexpected error："
             f"{error}",
             flush=True,
         )
@@ -2303,9 +2060,7 @@ class HealthHandler(
     BaseHTTPRequestHandler
 ):
 
-    def do_GET(
-        self
-    ):
+    def do_GET(self):
 
         if self.path in (
             "/",
@@ -2319,8 +2074,7 @@ class HealthHandler(
 
             self.send_header(
                 "Content-Type",
-                "text/plain; "
-                "charset=utf-8",
+                "text/plain; charset=utf-8",
             )
 
             self.end_headers()
@@ -2342,7 +2096,6 @@ class HealthHandler(
         format,
         *args,
     ):
-
         return
 
 
@@ -2362,14 +2115,11 @@ def run_web_server():
         )
 
         server = HTTPServer(
-
             (
                 "0.0.0.0",
                 port,
             ),
-
             HealthHandler,
-
         )
 
         print(
@@ -2463,7 +2213,9 @@ def print_configuration():
 
         print(
             "👤 Accounts: "
-            + ", ".join(USERNAMES),
+            + ", ".join(
+                USERNAMES
+            ),
             flush=True,
         )
 
@@ -2512,14 +2264,14 @@ def print_configuration():
     )
 
     print(
-        f"🔐 Session Username: "
-        f"{IG_SESSION_USERNAME}",
+        "🔐 Session Username: "
+        f"{IG_SESSION_USERNAME or '(not set)'}",
         flush=True,
     )
 
     print(
-        f"🔐 Session File: "
-        f"{IG_SESSION_FILE}",
+        "🔐 Session File: "
+        f"{IG_SESSION_FILE or '(not set)'}",
         flush=True,
     )
 
@@ -2539,11 +2291,6 @@ def main():
 
     print(
         "",
-        flush=True,
-    )
-
-    print(
-        "BOOT: entering main()",
         flush=True,
     )
 
@@ -2573,7 +2320,7 @@ def main():
     print_configuration()
 
     # --------------------------------------------------------
-    # Validate accounts
+    # Validate Accounts
     # --------------------------------------------------------
 
     if not USERNAMES:
@@ -2599,31 +2346,7 @@ def main():
         sys.exit(1)
 
     # --------------------------------------------------------
-    # Validate Session configuration
-    # --------------------------------------------------------
-
-    if not IG_SESSION_USERNAME:
-
-        print(
-            "❌ ERROR: IG_SESSION_USERNAME "
-            "沒有設定。",
-            flush=True,
-        )
-
-        sys.exit(1)
-
-    if not IG_SESSION_FILE:
-
-        print(
-            "❌ ERROR: IG_SESSION_FILE "
-            "沒有設定。",
-            flush=True,
-        )
-
-        sys.exit(1)
-
-    # --------------------------------------------------------
-    # Load Instagram Session
+    # Session
     # --------------------------------------------------------
 
     session_loaded = (
@@ -2638,39 +2361,22 @@ def main():
         )
 
         print(
-            "=" * 70,
+            "⚠️ WARNING:",
             flush=True,
         )
 
         print(
-            "❌ Instagram Session 無法使用。",
+            "⚠️ Instagram Session 沒有成功載入。",
             flush=True,
         )
 
         print(
-            "❌ 不會退回匿名模式。",
+            "⚠️ 目前請不要期待匿名模式可以正常長期抓取。",
             flush=True,
         )
-
-        print(
-            "❌ 為避免匿名模式造成 Instagram 429，",
-            flush=True,
-        )
-
-        print(
-            "❌ 程式停止。",
-            flush=True,
-        )
-
-        print(
-            "=" * 70,
-            flush=True,
-        )
-
-        sys.exit(1)
 
     # --------------------------------------------------------
-    # Start health server
+    # Health Server
     # --------------------------------------------------------
 
     print(
@@ -2679,11 +2385,8 @@ def main():
     )
 
     server_thread = threading.Thread(
-
         target=run_web_server,
-
         daemon=True,
-
     )
 
     server_thread.start()
@@ -2705,7 +2408,7 @@ def main():
     while not shutdown_requested:
 
         # ----------------------------------------------------
-        # Global cooldown
+        # Global Cooldown
         # ----------------------------------------------------
 
         if is_rate_limited():
@@ -2743,16 +2446,14 @@ def main():
             continue
 
         # ----------------------------------------------------
-        # Cycle lock
+        # Cycle Lock
         # ----------------------------------------------------
 
         if not CYCLE_LOCK.acquire(
             blocking=False
         ):
 
-            sleep_interruptible(
-                5
-            )
+            sleep_interruptible(5)
 
             continue
 
@@ -2802,7 +2503,6 @@ def main():
             ):
 
                 if shutdown_requested:
-
                     break
 
                 if is_rate_limited():
@@ -2810,8 +2510,7 @@ def main():
                     hit_rate_limit = True
 
                     print(
-                        "🛑 Instagram cooldown "
-                        "已啟動。",
+                        "🛑 Instagram cooldown 已啟動。",
                         flush=True,
                     )
 
@@ -2823,16 +2522,9 @@ def main():
                     break
 
                 result = check_account(
-
                     username,
-
                     STATE,
-
                 )
-
-                # --------------------------------------------
-                # Rate limited
-                # --------------------------------------------
 
                 if result == "RATE_LIMITED":
 
@@ -2860,22 +2552,17 @@ def main():
 
                     break
 
-                # --------------------------------------------
-                # Error
-                # --------------------------------------------
-
                 if result == "ERROR":
 
                     print(
-                        f"⚠️ @{username} "
-                        "本次檢查發生錯誤，"
+                        f"⚠️ @{username} 本次檢查發生錯誤，"
                         "繼續下一個帳號。",
                         flush=True,
                     )
 
-                # --------------------------------------------
-                # Account delay
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Account Delay
+                # ------------------------------------------------
 
                 if (
                     index
@@ -2900,7 +2587,7 @@ def main():
                     )
 
             # ------------------------------------------------
-            # Rate limit cycle
+            # Rate Limited
             # ------------------------------------------------
 
             if hit_rate_limit:
@@ -2933,7 +2620,7 @@ def main():
                 continue
 
             # ------------------------------------------------
-            # Cycle complete
+            # Cycle Complete
             # ------------------------------------------------
 
             if not shutdown_requested:
@@ -2957,8 +2644,7 @@ def main():
 
                 print(
                     "📋 已處理 "
-                    f"{len(USERNAMES)} "
-                    "個帳號。",
+                    f"{len(USERNAMES)} 個帳號。",
                     flush=True,
                 )
 
@@ -2992,8 +2678,7 @@ def main():
     )
 
     print(
-        "👋 Instagram → Discord Bot "
-        "stopped safely.",
+        "👋 Instagram → Discord Bot 已安全退出。",
         flush=True,
     )
 
@@ -3003,5 +2688,10 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
+    print(
+        "BOOT: entering main()",
+        flush=True,
+    )
 
     main()

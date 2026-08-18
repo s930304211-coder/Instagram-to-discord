@@ -25,6 +25,29 @@
 #   - Authentication error detection
 #   - 401 / 403 / 429 detection
 #   - Diagnostic startup logging
+#
+# IMPORTANT SAFETY BEHAVIOR:
+#
+#   429:
+#       Global cooldown
+#       + exponential backoff
+#       + jitter
+#       + post-cooldown safety delay
+#
+#   401 / 403 / LoginRequired /
+#   Checkpoint / Challenge / Session invalid:
+#
+#       SAFE STOP
+#       ↓
+#       停止所有 Instagram polling
+#       ↓
+#       Health Check 繼續運作
+#       ↓
+#       不會自動重新登入
+#       ↓
+#       不會繼續碰 Instagram
+#       ↓
+#       需要人工確認帳號恢復後再重新啟動
 # ============================================================
 
 
@@ -32,7 +55,10 @@
 # BOOT
 # ============================================================
 
-print("BOOT: Python process started", flush=True)
+print(
+    "BOOT: Python process started",
+    flush=True,
+)
 
 
 # ============================================================
@@ -55,14 +81,20 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 
-print("BOOT: standard libraries imported", flush=True)
+print(
+    "BOOT: standard libraries imported",
+    flush=True,
+)
 
 
 # ============================================================
 # Third Party
 # ============================================================
 
-print("BOOT: importing instaloader...", flush=True)
+print(
+    "BOOT: importing instaloader...",
+    flush=True,
+)
 
 import instaloader
 
@@ -73,7 +105,10 @@ print(
 )
 
 
-print("BOOT: importing requests...", flush=True)
+print(
+    "BOOT: importing requests...",
+    flush=True,
+)
 
 import requests
 
@@ -92,6 +127,7 @@ RAW_USERNAMES = os.environ.get(
     "IG_USERNAME",
     "",
 )
+
 
 USERNAMES = [
     username.strip()
@@ -124,6 +160,7 @@ CHECK_INTERVAL = int(
     )
 )
 
+
 ACCOUNT_DELAY = int(
     os.environ.get(
         "ACCOUNT_DELAY",
@@ -144,6 +181,7 @@ STARTUP_DELAY_MIN = int(
         "120",
     )
 )
+
 
 STARTUP_DELAY_MAX = int(
     os.environ.get(
@@ -167,6 +205,7 @@ COOLDOWN_RETRY_DELAY_MIN = int(
     )
 )
 
+
 COOLDOWN_RETRY_DELAY_MAX = int(
     os.environ.get(
         "COOLDOWN_RETRY_DELAY_MAX",
@@ -186,6 +225,7 @@ INITIAL_BACKOFF = int(
     )
 )
 
+
 MAX_BACKOFF = int(
     os.environ.get(
         "MAX_BACKOFF",
@@ -193,12 +233,14 @@ MAX_BACKOFF = int(
     )
 )
 
+
 BACKOFF_JITTER_MIN = int(
     os.environ.get(
         "BACKOFF_JITTER_MIN",
         "30",
     )
 )
+
 
 BACKOFF_JITTER_MAX = int(
     os.environ.get(
@@ -271,6 +313,7 @@ MAX_DISCORD_FILE_SIZE = int(
     )
 )
 
+
 MAX_MEDIA_ITEMS = 9
 
 
@@ -288,12 +331,38 @@ backoff_seconds = INITIAL_BACKOFF
 
 
 # ============================================================
+# Authentication SAFE STOP
+#
+# 一旦 Instagram 回報：
+#
+#   401
+#   403
+#   LoginRequired
+#   Checkpoint
+#   Challenge
+#   Session invalid
+#
+# 就設定為 True。
+#
+# 後續不再進行任何 Instagram polling。
+#
+# Health Check Server 不受影響。
+# ============================================================
+
+instagram_auth_blocked = False
+
+instagram_auth_block_reason = ""
+
+
+# ============================================================
 # Locks
 # ============================================================
 
 STATE_LOCK = threading.Lock()
 
 RATE_LIMIT_LOCK = threading.Lock()
+
+AUTH_LOCK = threading.Lock()
 
 CYCLE_LOCK = threading.Lock()
 
@@ -353,6 +422,7 @@ class AbortOn429RateController(
         self,
         query_type,
     ):
+
         raise InstagramRateLimited(
             "Instagram HTTP 429 Too Many Requests "
             f"(query_type={query_type})"
@@ -368,6 +438,7 @@ print(
     flush=True,
 )
 
+
 L = instaloader.Instaloader(
     download_pictures=False,
     download_videos=False,
@@ -381,6 +452,7 @@ L = instaloader.Instaloader(
     rate_controller=lambda context:
         AbortOn429RateController(context),
 )
+
 
 print(
     "BOOT: Instaloader instance created",
@@ -409,6 +481,7 @@ def format_seconds(seconds):
     secs = seconds % 60
 
     if hours > 0:
+
         return (
             f"{hours}h "
             f"{minutes}m "
@@ -416,6 +489,7 @@ def format_seconds(seconds):
         )
 
     if minutes > 0:
+
         return (
             f"{minutes}m "
             f"{secs}s"
@@ -453,6 +527,134 @@ def sleep_interruptible(seconds):
 
 
 # ============================================================
+# Authentication SAFE STOP Helpers
+# ============================================================
+
+def is_auth_blocked():
+
+    with AUTH_LOCK:
+
+        return instagram_auth_blocked
+
+
+def get_auth_block_reason():
+
+    with AUTH_LOCK:
+
+        return instagram_auth_block_reason
+
+
+def trigger_auth_safe_stop(
+    reason,
+    error=None,
+):
+
+    global instagram_auth_blocked
+    global instagram_auth_block_reason
+
+    with AUTH_LOCK:
+
+        if instagram_auth_blocked:
+
+            return
+
+        instagram_auth_blocked = True
+
+        instagram_auth_block_reason = (
+            str(reason)
+        )
+
+    print(
+        "",
+        flush=True,
+    )
+
+    print(
+        "=" * 70,
+        flush=True,
+    )
+
+    print(
+        "🛑 INSTAGRAM AUTHENTICATION SAFE STOP",
+        flush=True,
+    )
+
+    print(
+        "=" * 70,
+        flush=True,
+    )
+
+    print(
+        "🔐 Instagram authentication 狀態異常。",
+        flush=True,
+    )
+
+    print(
+        "⚠️ 原因："
+        f"{reason}",
+        flush=True,
+    )
+
+    if error is not None:
+
+        print(
+            "⚠️ Error："
+            f"{error}",
+            flush=True,
+        )
+
+    print(
+        "",
+        flush=True,
+    )
+
+    print(
+        "🛑 已停止所有 Instagram polling。",
+        flush=True,
+    )
+
+    print(
+        "🛑 不會自動重新登入。",
+        flush=True,
+    )
+
+    print(
+        "🛑 不會自動重新載入 Session。",
+        flush=True,
+    )
+
+    print(
+        "🛑 不會繼續下一個 Instagram 帳號。",
+        flush=True,
+    )
+
+    print(
+        "",
+        flush=True,
+    )
+
+    print(
+        "🌐 Health Check Server 仍會保持運作。",
+        flush=True,
+    )
+
+    print(
+        "👤 請人工確認 Instagram 帳號恢復正常。",
+        flush=True,
+    )
+
+    print(
+        "🔄 確認恢復後，再重新啟動 Render Service。",
+        flush=True,
+    )
+
+    print(
+        "=" * 70,
+        flush=True,
+    )
+
+
+# ============================================================
 # State Load
 # ============================================================
 
@@ -467,7 +669,9 @@ def load_state():
         flush=True,
     )
 
-    if not os.path.exists(STATE_FILE):
+    if not os.path.exists(
+        STATE_FILE
+    ):
 
         print(
             f"[STATE] {STATE_FILE} 不存在。",
@@ -514,47 +718,57 @@ def load_state():
                 meta,
                 dict,
             ):
+
                 meta = {}
 
             if PERSIST_COOLDOWN:
 
                 try:
+
                     saved_until = float(
                         meta.get(
                             "rate_limit_until",
                             0.0,
                         )
                     )
+
                 except (
                     TypeError,
                     ValueError,
                 ):
+
                     saved_until = 0.0
 
                 try:
+
                     saved_retry = float(
                         meta.get(
                             "retry_not_before",
                             0.0,
                         )
                     )
+
                 except (
                     TypeError,
                     ValueError,
                 ):
+
                     saved_retry = 0.0
 
                 try:
+
                     saved_backoff = int(
                         meta.get(
                             "backoff_seconds",
                             INITIAL_BACKOFF,
                         )
                     )
+
                 except (
                     TypeError,
                     ValueError,
                 ):
+
                     saved_backoff = INITIAL_BACKOFF
 
                 saved_backoff = min(
@@ -570,12 +784,20 @@ def load_state():
                 with RATE_LIMIT_LOCK:
 
                     if saved_until > now:
-                        rate_limit_until = saved_until
+
+                        rate_limit_until = (
+                            saved_until
+                        )
 
                     if saved_retry > now:
-                        retry_not_before = saved_retry
 
-                    backoff_seconds = saved_backoff
+                        retry_not_before = (
+                            saved_retry
+                        )
+
+                    backoff_seconds = (
+                        saved_backoff
+                    )
 
                 if saved_until > now:
 
@@ -617,6 +839,7 @@ def load_state():
             posts_state,
             dict,
         ):
+
             posts_state = {}
 
         print(
@@ -777,6 +1000,7 @@ def get_remaining_cooldown():
         )
 
     if remaining <= 0:
+
         return 0
 
     return max(
@@ -807,6 +1031,7 @@ def get_remaining_retry_delay():
         )
 
     if remaining <= 0:
+
         return 0
 
     return max(
@@ -824,6 +1049,7 @@ def get_remaining_retry_delay():
 def extract_wait_seconds(error):
 
     if not error:
+
         return None
 
     text = str(error)
@@ -847,13 +1073,16 @@ def extract_wait_seconds(error):
         if match:
 
             try:
+
                 return int(
                     match.group(1)
                 )
+
             except (
                 TypeError,
                 ValueError,
             ):
+
                 pass
 
     return None
@@ -865,7 +1094,9 @@ def extract_wait_seconds(error):
 
 def classify_instagram_error(error):
 
-    text = str(error or "")
+    text = str(
+        error or ""
+    )
 
     lower = text.lower()
 
@@ -881,6 +1112,7 @@ def classify_instagram_error(error):
         or "rate-limit" in lower
         or "rate limited" in lower
     ):
+
         return "RATE_LIMITED"
 
     # --------------------------------------------------------
@@ -896,20 +1128,29 @@ def classify_instagram_error(error):
         or "please login" in lower
         or "not logged in" in lower
         or "session is invalid" in lower
+        or "session invalid" in lower
+        or "invalid session" in lower
     ):
+
         return "AUTH_401"
 
     # --------------------------------------------------------
-    # Checkpoint
+    # Challenge / Checkpoint
     # --------------------------------------------------------
 
     if (
         "checkpoint" in lower
         or "challenge_required" in lower
         or "challenge required" in lower
+        or "/challenge/" in lower
+        or "challenge/" in lower
         or "suspicious login" in lower
         or "security code" in lower
+        or "security checkpoint" in lower
+        or "confirm your identity" in lower
+        or "verify your identity" in lower
     ):
+
         return "CHECKPOINT"
 
     # --------------------------------------------------------
@@ -921,6 +1162,7 @@ def classify_instagram_error(error):
         or "forbidden" in lower
         or "access denied" in lower
     ):
+
         return "AUTH_403"
 
     return "OTHER"
@@ -968,6 +1210,7 @@ def trigger_backoff(
 
         # 即使 Instagram 有提供等待時間
         # 仍加一點 jitter，避免固定時間重試
+
         jitter = random.randint(
             BACKOFF_JITTER_MIN,
             BACKOFF_JITTER_MAX,
@@ -1025,7 +1268,9 @@ def trigger_backoff(
             MAX_BACKOFF,
         )
 
-        backoff_seconds = next_backoff
+        backoff_seconds = (
+            next_backoff
+        )
 
         # ----------------------------------------------------
         # Cooldown 結束後再多等一段時間
@@ -1131,7 +1376,9 @@ def reset_backoff():
 
     with RATE_LIMIT_LOCK:
 
-        backoff_seconds = INITIAL_BACKOFF
+        backoff_seconds = (
+            INITIAL_BACKOFF
+        )
 
 
 # ============================================================
@@ -1236,7 +1483,9 @@ def load_instagram_session():
             flush=True,
         )
 
-        session_path = IG_SESSION_FILE
+        session_path = (
+            IG_SESSION_FILE
+        )
 
         # ----------------------------------------------------
         # Base64
@@ -1251,7 +1500,6 @@ def load_instagram_session():
 
             try:
 
-                # 去掉空白
                 encoded = re.sub(
                     rb"\s+",
                     b"",
@@ -1285,7 +1533,9 @@ def load_instagram_session():
                     "wb",
                 ) as file:
 
-                    file.write(decoded)
+                    file.write(
+                        decoded
+                    )
 
                 session_path = (
                     temp_session
@@ -1368,6 +1618,10 @@ def load_instagram_session():
 
     except Exception as error:
 
+        category = classify_instagram_error(
+            error
+        )
+
         print(
             "❌ INSTAGRAM SESSION ERROR",
             flush=True,
@@ -1376,6 +1630,29 @@ def load_instagram_session():
         print(
             "Session 載入失敗："
             f"{error}",
+            flush=True,
+        )
+
+        # ----------------------------------------------------
+        # 如果 Session 本身已經被判定為認證異常
+        # 直接 SAFE STOP。
+        # ----------------------------------------------------
+
+        if category in (
+            "AUTH_401",
+            "AUTH_403",
+            "CHECKPOINT",
+        ):
+
+            trigger_auth_safe_stop(
+                category,
+                error,
+            )
+
+            return False
+
+        print(
+            "[IG] Session 載入失敗。",
             flush=True,
         )
 
@@ -1392,6 +1669,12 @@ def load_instagram_session():
 # ============================================================
 
 def get_latest_post(username):
+
+    if is_auth_blocked():
+
+        raise InstagramAuthenticationError(
+            "Instagram authentication SAFE STOP active"
+        )
 
     print(
         f"[IG] 取得 @{username} profile...",
@@ -1474,6 +1757,7 @@ def download_file(
             ):
 
                 if not chunk:
+
                     continue
 
                 total_size += len(chunk)
@@ -1490,15 +1774,20 @@ def download_file(
                     )
 
                     try:
+
                         os.remove(
                             temp_path
                         )
+
                     except OSError:
+
                         pass
 
                     return None
 
-                file.write(chunk)
+                file.write(
+                    chunk
+                )
 
         print(
             "[MEDIA] 下載完成："
@@ -1517,10 +1806,13 @@ def download_file(
         )
 
         try:
+
             os.remove(
                 temp_path
             )
+
         except OSError:
+
             pass
 
         return None
@@ -1907,17 +2199,23 @@ def send_discord_notification(
         for file_object in file_handles:
 
             try:
+
                 file_object.close()
+
             except Exception:
+
                 pass
 
         for file_path in temp_files:
 
             try:
+
                 os.remove(
                     file_path
                 )
+
             except OSError:
+
                 pass
 
 
@@ -1930,6 +2228,24 @@ def check_account(
     state,
 ):
 
+    # --------------------------------------------------------
+    # Authentication SAFE STOP
+    # --------------------------------------------------------
+
+    if is_auth_blocked():
+
+        print(
+            f"[{username}] "
+            "Instagram authentication SAFE STOP 中。",
+            flush=True,
+        )
+
+        return "AUTH_ERROR"
+
+    # --------------------------------------------------------
+    # 429 Global Cooldown
+    # --------------------------------------------------------
+
     if is_rate_limited():
 
         print(
@@ -1938,6 +2254,10 @@ def check_account(
         )
 
         return "RATE_LIMITED"
+
+    # --------------------------------------------------------
+    # Post Cooldown Delay
+    # --------------------------------------------------------
 
     if is_retry_delayed():
 
@@ -2031,9 +2351,13 @@ def check_account(
 
             with STATE_LOCK:
 
-                state[username] = shortcode
+                state[username] = (
+                    shortcode
+                )
 
-            save_state(state)
+            save_state(
+                state
+            )
 
             return "SUCCESS"
 
@@ -2092,9 +2416,13 @@ def check_account(
 
             with STATE_LOCK:
 
-                state[username] = shortcode
+                state[username] = (
+                    shortcode
+                )
 
-            if save_state(state):
+            if save_state(
+                state
+            ):
 
                 print(
                     f"✅ [{username}] State updated。",
@@ -2171,7 +2499,9 @@ def check_account(
             flush=True,
         )
 
-        trigger_backoff(error)
+        trigger_backoff(
+            error
+        )
 
         return "RATE_LIMITED"
 
@@ -2199,9 +2529,9 @@ def check_account(
             flush=True,
         )
 
-        print(
-            "⚠️ 請檢查 Session 是否失效。",
-            flush=True,
+        trigger_auth_safe_stop(
+            "LOGIN_REQUIRED",
+            error,
         )
 
         return "AUTH_ERROR"
@@ -2225,7 +2555,6 @@ def check_account(
     # ========================================================
     # Connection Exception
     #
-    # 重要：
     # 不再把所有 ConnectionException 當 429。
     # ========================================================
 
@@ -2237,7 +2566,9 @@ def check_account(
             error
         )
 
-        error_text = str(error)
+        error_text = str(
+            error
+        )
 
         if category == "RATE_LIMITED":
 
@@ -2253,7 +2584,9 @@ def check_account(
                 flush=True,
             )
 
-            trigger_backoff(error)
+            trigger_backoff(
+                error
+            )
 
             return "RATE_LIMITED"
 
@@ -2268,6 +2601,11 @@ def check_account(
             print(
                 f"[AUTH] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "AUTH_401",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2285,6 +2623,11 @@ def check_account(
                 flush=True,
             )
 
+            trigger_auth_safe_stop(
+                "AUTH_403",
+                error,
+            )
+
             return "AUTH_ERROR"
 
         if category == "CHECKPOINT":
@@ -2298,6 +2641,11 @@ def check_account(
             print(
                 f"[CHECKPOINT] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "CHECKPOINT_OR_CHALLENGE",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2332,7 +2680,9 @@ def check_account(
             error
         )
 
-        error_text = str(error)
+        error_text = str(
+            error
+        )
 
         if category == "RATE_LIMITED":
 
@@ -2342,7 +2692,9 @@ def check_account(
                 flush=True,
             )
 
-            trigger_backoff(error)
+            trigger_backoff(
+                error
+            )
 
             return "RATE_LIMITED"
 
@@ -2357,6 +2709,11 @@ def check_account(
             print(
                 f"[AUTH] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "AUTH_401",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2374,6 +2731,11 @@ def check_account(
                 flush=True,
             )
 
+            trigger_auth_safe_stop(
+                "AUTH_403",
+                error,
+            )
+
             return "AUTH_ERROR"
 
         if category == "CHECKPOINT":
@@ -2387,6 +2749,11 @@ def check_account(
             print(
                 f"[CHECKPOINT] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "CHECKPOINT_OR_CHALLENGE",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2405,6 +2772,25 @@ def check_account(
         return "ERROR"
 
     # ========================================================
+    # Authentication Error
+    # ========================================================
+
+    except InstagramAuthenticationError as error:
+
+        print(
+            f"🛑 [{username}] "
+            "Instagram Authentication SAFE STOP。",
+            flush=True,
+        )
+
+        trigger_auth_safe_stop(
+            "INSTAGRAM_AUTHENTICATION_ERROR",
+            error,
+        )
+
+        return "AUTH_ERROR"
+
+    # ========================================================
     # Unexpected Error
     # ========================================================
 
@@ -2414,7 +2800,9 @@ def check_account(
             error
         )
 
-        error_text = str(error)
+        error_text = str(
+            error
+        )
 
         if category == "RATE_LIMITED":
 
@@ -2424,7 +2812,9 @@ def check_account(
                 flush=True,
             )
 
-            trigger_backoff(error)
+            trigger_backoff(
+                error
+            )
 
             return "RATE_LIMITED"
 
@@ -2439,6 +2829,11 @@ def check_account(
             print(
                 f"[AUTH] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "AUTH_401",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2456,19 +2851,29 @@ def check_account(
                 flush=True,
             )
 
+            trigger_auth_safe_stop(
+                "AUTH_403",
+                error,
+            )
+
             return "AUTH_ERROR"
 
         if category == "CHECKPOINT":
 
             print(
                 f"🔐 [{username}] "
-                "Unexpected error 但疑似 Checkpoint。",
+                "Unexpected error 但疑似 Checkpoint / Challenge。",
                 flush=True,
             )
 
             print(
                 f"[CHECKPOINT] {error_text}",
                 flush=True,
+            )
+
+            trigger_auth_safe_stop(
+                "CHECKPOINT_OR_CHALLENGE",
+                error,
             )
 
             return "AUTH_ERROR"
@@ -2499,7 +2904,9 @@ class HealthHandler(
             "/healthz",
         ):
 
-            self.send_response(200)
+            self.send_response(
+                200
+            )
 
             self.send_header(
                 "Content-Type",
@@ -2508,13 +2915,37 @@ class HealthHandler(
 
             self.end_headers()
 
+            # ------------------------------------------------
+            # 即使 Instagram SAFE STOP
+            # Health Check 仍回傳 200。
+            # ------------------------------------------------
+
+            if is_auth_blocked():
+
+                message = (
+                    "Instagram to Discord Bot is alive. "
+                    "Instagram polling is stopped "
+                    "because authentication requires "
+                    "manual attention."
+                )
+
+            else:
+
+                message = (
+                    "Instagram to Discord Bot is alive."
+                )
+
             self.wfile.write(
-                b"Instagram to Discord Bot is alive."
+                message.encode(
+                    "utf-8"
+                )
             )
 
             return
 
-        self.send_response(404)
+        self.send_response(
+            404
+        )
 
         self.end_headers()
 
@@ -2705,6 +3136,17 @@ def print_configuration():
         flush=True,
     )
 
+    print(
+        "🛑 Authentication SAFE STOP: ENABLED",
+        flush=True,
+    )
+
+    print(
+        "🕐 429 cooldown log interval: "
+        "300s maximum",
+        flush=True,
+    )
+
     if IG_SESSION_FILE:
 
         print(
@@ -2800,6 +3242,100 @@ def startup_delay():
 
 
 # ============================================================
+# Authentication Safe Stop Loop
+# ============================================================
+
+def authentication_safe_stop_loop():
+
+    print(
+        "",
+        flush=True,
+    )
+
+    print(
+        "=" * 70,
+        flush=True,
+    )
+
+    print(
+        "🛑 Instagram Authentication SAFE STOP ACTIVE",
+        flush=True,
+    )
+
+    print(
+        "🔐 Instagram polling 已完全停止。",
+        flush=True,
+    )
+
+    print(
+        "🌐 Health Check Server 繼續運作。",
+        flush=True,
+    )
+
+    print(
+        "⚠️ 請人工處理 Instagram 帳號。",
+        flush=True,
+    )
+
+    print(
+        "🔄 Instagram 恢復正常後，"
+        "重新啟動 Render Service。",
+        flush=True,
+    )
+
+    print(
+        "=" * 70,
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # 不再自動碰 Instagram。
+    #
+    # 每 5 分鐘只輸出一次狀態，
+    # 避免 Render Log 爆量。
+    # --------------------------------------------------------
+
+    while (
+        not shutdown_requested
+        and is_auth_blocked()
+    ):
+
+        reason = (
+            get_auth_block_reason()
+        )
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "🛑 Instagram SAFE STOP 中。",
+            flush=True,
+        )
+
+        print(
+            "🔐 Reason："
+            f"{reason}",
+            flush=True,
+        )
+
+        print(
+            "🌐 Health Check：仍然運作。",
+            flush=True,
+        )
+
+        print(
+            "⏳ 不會自動重新嘗試 Instagram。",
+            flush=True,
+        )
+
+        sleep_interruptible(
+            300
+        )
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -2882,10 +3418,25 @@ def main():
 
     else:
 
-        print(
-            "⚠️ Instagram Session MODE DISABLED",
-            flush=True,
-        )
+        # ----------------------------------------------------
+        # 如果 Session 載入本身已經觸發 SAFE STOP
+        # 不允許繼續進入 polling。
+        # ----------------------------------------------------
+
+        if is_auth_blocked():
+
+            print(
+                "🛑 Instagram Session "
+                "Authentication SAFE STOP。",
+                flush=True,
+            )
+
+        else:
+
+            print(
+                "⚠️ Instagram Session MODE DISABLED",
+                flush=True,
+            )
 
     # --------------------------------------------------------
     # Health Server
@@ -2914,6 +3465,28 @@ def main():
     )
 
     # --------------------------------------------------------
+    # 如果 Session 載入時就已經出現認證問題
+    # 直接 SAFE STOP。
+    # --------------------------------------------------------
+
+    if is_auth_blocked():
+
+        authentication_safe_stop_loop()
+
+        print(
+            "",
+            flush=True,
+        )
+
+        print(
+            "👋 Instagram → Discord Bot "
+            "已安全退出。",
+            flush=True,
+        )
+
+        return
+
+    # --------------------------------------------------------
     # Startup Delay
     # --------------------------------------------------------
 
@@ -2930,12 +3503,32 @@ def main():
     while not shutdown_requested:
 
         # ----------------------------------------------------
+        # Authentication SAFE STOP
+        # ----------------------------------------------------
+
+        if is_auth_blocked():
+
+            authentication_safe_stop_loop()
+
+            break
+
+        # ----------------------------------------------------
         # Global cooldown
+        #
+        # IMPORTANT:
+        #
+        # 原本每 60 秒 wake up 一次。
+        #
+        # 現在改成最多 300 秒。
+        #
+        # 因此 Render Log 不會每分鐘刷一次。
         # ----------------------------------------------------
 
         if is_rate_limited():
 
-            remaining = get_remaining_cooldown()
+            remaining = (
+                get_remaining_cooldown()
+            )
 
             print(
                 "",
@@ -2955,12 +3548,7 @@ def main():
 
             # ------------------------------------------------
             # 每 5 分鐘更新一次 Log
-            #
-            # 不會每分鐘刷 Render Log
-            #
-            # sleep_interruptible() 仍然每秒檢查
-            # shutdown_requested，因此收到 SIGTERM
-            # 時仍然可以快速退出。
+            # 收到 SIGTERM 可以快速退出
             # ------------------------------------------------
 
             sleep_interruptible(
@@ -3008,7 +3596,7 @@ def main():
                         remaining,
                         1,
                     ),
-                    60,
+                    300,
                 )
             )
 
@@ -3022,7 +3610,9 @@ def main():
             blocking=False
         ):
 
-            sleep_interruptible(5)
+            sleep_interruptible(
+                5
+            )
 
             continue
 
@@ -3063,6 +3653,8 @@ def main():
 
             hit_rate_limit = False
 
+            hit_auth_error = False
+
             # =================================================
             # Accounts
             # =================================================
@@ -3072,6 +3664,28 @@ def main():
             ):
 
                 if shutdown_requested:
+
+                    break
+
+                # ------------------------------------------------
+                # Authentication SAFE STOP
+                # ------------------------------------------------
+
+                if is_auth_blocked():
+
+                    hit_auth_error = True
+
+                    print(
+                        "🛑 Instagram Authentication "
+                        "SAFE STOP 已啟動。",
+                        flush=True,
+                    )
+
+                    print(
+                        "🛑 立即停止目前 cycle。",
+                        flush=True,
+                    )
+
                     break
 
                 # ------------------------------------------------
@@ -3126,6 +3740,37 @@ def main():
                 )
 
                 # ------------------------------------------------
+                # Authentication error
+                # ------------------------------------------------
+
+                if result == "AUTH_ERROR":
+
+                    hit_auth_error = True
+
+                    print(
+                        "",
+                        flush=True,
+                    )
+
+                    print(
+                        "🛑 Instagram "
+                        "Authentication 問題。",
+                        flush=True,
+                    )
+
+                    print(
+                        "🛑 不再檢查後面的帳號。",
+                        flush=True,
+                    )
+
+                    print(
+                        "🛑 本輪立即停止。",
+                        flush=True,
+                    )
+
+                    break
+
+                # ------------------------------------------------
                 # Rate limit
                 # ------------------------------------------------
 
@@ -3156,23 +3801,6 @@ def main():
                     break
 
                 # ------------------------------------------------
-                # Authentication error
-                # ------------------------------------------------
-
-                if result == "AUTH_ERROR":
-
-                    print(
-                        f"⚠️ @{username} "
-                        "Instagram Authentication 問題。",
-                        flush=True,
-                    )
-
-                    print(
-                        "⚠️ 不當作 429。",
-                        flush=True,
-                    )
-
-                # ------------------------------------------------
                 # Other error
                 # ------------------------------------------------
 
@@ -3195,6 +3823,29 @@ def main():
                     and not shutdown_requested
                 ):
 
+                    # ------------------------------------------------
+                    # 如果中途出現 SAFE STOP
+                    # 不要再等待後繼續碰 Instagram。
+                    # ------------------------------------------------
+
+                    if is_auth_blocked():
+
+                        hit_auth_error = True
+
+                        print(
+                            "🛑 Authentication SAFE STOP "
+                            "已啟動。",
+                            flush=True,
+                        )
+
+                        break
+
+                    if is_rate_limited():
+
+                        hit_rate_limit = True
+
+                        break
+
                     print(
                         "",
                         flush=True,
@@ -3210,6 +3861,61 @@ def main():
                     sleep_interruptible(
                         ACCOUNT_DELAY
                     )
+
+            # =================================================
+            # Authentication SAFE STOP
+            # =================================================
+
+            if (
+                hit_auth_error
+                or is_auth_blocked()
+            ):
+
+                print(
+                    "",
+                    flush=True,
+                )
+
+                print(
+                    "=" * 70,
+                    flush=True,
+                )
+
+                print(
+                    "🛑 本輪因 Instagram "
+                    "Authentication / Challenge "
+                    "停止。",
+                    flush=True,
+                )
+
+                print(
+                    "🛑 Instagram polling 已停止。",
+                    flush=True,
+                )
+
+                print(
+                    "🌐 Health Check 繼續運作。",
+                    flush=True,
+                )
+
+                print(
+                    "🔐 Reason："
+                    f"{get_auth_block_reason()}",
+                    flush=True,
+                )
+
+                print(
+                    "=" * 70,
+                    flush=True,
+                )
+
+                # ------------------------------------------------
+                # 進入永久 SAFE STOP
+                # ------------------------------------------------
+
+                authentication_safe_stop_loop()
+
+                break
 
             # =================================================
             # Rate Limited

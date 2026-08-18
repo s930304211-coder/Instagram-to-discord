@@ -2935,9 +2935,7 @@ def main():
 
         if is_rate_limited():
 
-            remaining = (
-                get_remaining_cooldown()
-            )
+            remaining = get_remaining_cooldown()
 
             print(
                 "",
@@ -2955,15 +2953,23 @@ def main():
                 flush=True,
             )
 
-            # 每次最多睡 60 秒
-            # 收到 SIGTERM 可以快速退出
+            # ------------------------------------------------
+            # 每 5 分鐘更新一次 Log
+            #
+            # 不會每分鐘刷 Render Log
+            #
+            # sleep_interruptible() 仍然每秒檢查
+            # shutdown_requested，因此收到 SIGTERM
+            # 時仍然可以快速退出。
+            # ------------------------------------------------
+
             sleep_interruptible(
                 min(
                     max(
                         remaining,
                         1,
                     ),
-                    60,
+                    300,
                 )
             )
 
